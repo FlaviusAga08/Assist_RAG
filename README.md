@@ -6,3 +6,4 @@ Then start fastapi:
 uvicorn answers:app --reload
 Make sure to remove the database before training like this:
 rm -rf db/
+Fill in .env OPENAI_API_KEY with your openAPI key
