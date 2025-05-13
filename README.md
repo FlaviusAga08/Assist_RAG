@@ -1,9 +1,11 @@
 # Assist_RAG
 
-Activate the virtual environment RAG like this:
-source RAG/bin/activate
-Then start fastapi:
-uvicorn answers:app --reload
-Make sure to remove the database before training like this:
-rm -rf db/
-Fill in .env OPENAI_API_KEY with your openAPI key
+## Stept to run
+- Activate the virtual environment RAG like this:
+``` source RAG/bin/activate ```
+ - Fill OPENAI_API_KEY environment variable with a valid openAPI key.
+
+- start fastapi:``` uvicorn answers:app --reload```
+
+## Optional
+Before training remove the database: ```rm -rf db/```
