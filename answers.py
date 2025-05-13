@@ -1,31 +1,48 @@
 import os
+import json
+import nltk
+import subprocess
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
-from fastapi.middleware.cors import CORSMiddleware
-from langchain.chat_models import ChatOpenAI
-from langchain_community.embeddings import OpenAIEmbeddings
+
+from dotenv import load_dotenv
+from models import Base, engine, SessionLocal, QueryHistory
+
+# LangChain imports
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.llms import OpenAI
 from langchain.chains import RetrievalQA
 from langchain_community.document_loaders import (
     PyPDFLoader,
-    UnstructuredWordDocumentLoader,
     UnstructuredFileLoader,
-    UnstructuredExcelLoader,
     Docx2txtLoader,
 )
 from langchain_chroma import Chroma
-from dotenv import load_dotenv
 
+# Optional Excel loader (requires pandas and openpyxl)
+try:
+    from langchain_community.document_loaders import UnstructuredExcelLoader
+    excel_supported = True
+except ImportError:
+    excel_supported = False
+    print(" Excel files will be skipped. Run `pip install pandas openpyxl` to enable.")
 
+# Load environment variables
 load_dotenv()
-api_key = os.environ.get("OPENAI_API_KEY")
-# FastAPI app
-app = FastAPI()
+api_key = os.getenv("OPENAI_API_KEY")
 
-#llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0, openai_api_key=api_key)
+# Download NLTK data
+nltk.download("punkt")
+nltk.download("averaged_perceptron_tagger")
+
+# Initialize DB
+Base.metadata.create_all(bind=engine)
+
+# Initialize FastAPI
+app = FastAPI()
 
 # Enable CORS
 app.add_middleware(
@@ -44,63 +61,75 @@ class QueryResponse(BaseModel):
     result: str
     sources: List[str]
 
+# Function to convert .doc to .docx using LibreOffice
+def convert_doc_to_docx(doc_path: str) -> str:
+    output_dir = os.path.dirname(doc_path)
+    try:
+        subprocess.run(
+            ["libreoffice", "--headless", "--convert-to", "docx", "--outdir", output_dir, doc_path],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        converted_path = doc_path.replace(".doc", ".docx")
+        if os.path.exists(converted_path):
+            print(f" Converted: {doc_path} → {converted_path}")
+            return converted_path
+    except subprocess.CalledProcessError:
+        print(f" Failed to convert: {doc_path}")
+    return None
+
 # Load documents from directory
 doc_directory = "/home/flavius/Documents/Sistem RAG Licitatii publice/FAQ pentru AI/Documente utile"
 persist_directory = "db"
 
 all_docs = []
 
-# Load documents and add metadata
-for path in Path(doc_directory).rglob('*'):
+for path in Path(doc_directory).rglob("*"):
     if path.is_file():
         filename = path.name
-        file_path = os.path.join(doc_directory, filename)
+        file_path = str(path)
+        loader = None
+
         try:
             if filename.endswith(".pdf"):
                 loader = PyPDFLoader(file_path)
-            elif filename.endswith(".xlsx"):
+            elif filename.endswith(".docx"):
+                loader = Docx2txtLoader(file_path)
+            elif filename.endswith(".doc"):
+                converted = convert_doc_to_docx(file_path)
+                if converted:
+                    loader = Docx2txtLoader(converted)
+            elif filename.endswith(".xlsx") and excel_supported:
                 loader = UnstructuredExcelLoader(file_path)
-            elif filename.endswith(".docx") or filename.endswith(".doc"):
-                loader = UnstructuredWordDocumentLoader(file_path)
             elif filename.lower().endswith((".txt", ".md", ".rtf")):
                 loader = UnstructuredFileLoader(file_path)
+
+            if loader:
+                print(f" Loading: {filename}")
+                docs = loader.load()
+                for doc in docs:
+                    doc.metadata["source"] = filename
+                all_docs.extend(docs)
             else:
-                print(f"Skipped unsupported file: {filename}")
-                continue
-
-            docs = loader.load()
-
-            # Inject metadata
-            for doc in docs:
-                doc.metadata["source"] = filename  # or file_path if you want full path
-
-            all_docs.extend(docs)
+                print(f" Skipped unsupported file: {filename}")
 
         except Exception as e:
-            print(f"Error loading {filename}: {e}")
+            print(f" Error loading {filename}: {e}")
 
-# Split documents into chunks
+# Split documents
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
 texts = text_splitter.split_documents(all_docs)
 
-# Embedding setup
+# Embeddings and vector DB
 embedding = OpenAIEmbeddings(openai_api_key=api_key)
-
-# Vector DB setup
-# Update Chroma initialization and remove the direct embedding_function argument
-vectordb = Chroma.from_documents(
-    texts, 
-    embedding, 
-    persist_directory=persist_directory
-)
-
-# Create retriever
+vectordb = Chroma.from_documents(texts, embedding, persist_directory=persist_directory)
 retriever = vectordb.as_retriever(search_kwargs={"k": 5})
 
-# Initialize language model (OpenAI)
-llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0,openai_api_key=api_key)
+# LLM setup
+llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0, openai_api_key=api_key)
 
-# Setup the retrieval-based QA chain
+# Retrieval QA chain
 qa_chain = RetrievalQA.from_chain_type(
     llm=llm,
     chain_type="stuff",
@@ -108,21 +137,43 @@ qa_chain = RetrievalQA.from_chain_type(
     return_source_documents=True
 )
 
-# Query endpoint
 @app.post("/query", response_model=QueryResponse)
 async def run_query(request: QueryRequest):
+    db = SessionLocal()
     try:
         response = qa_chain.invoke(request.query)
-
         result_text = response["result"]
-        #sources = [doc.metadata.get("source", "Unknown") for doc in response["source_documents"]]
-        #sources = list({doc.metadata.get("source", "Unknown") for doc in response["source_documents"]})
         sources = list({
-                        f'{doc.metadata.get("source", "Unknown")} - page {doc.metadata.get("page", "N/A")+1}'
-                            for doc in response["source_documents"]
-            })
+            f'{doc.metadata.get("source", "Unknown")} - page {doc.metadata.get("page", "N/A")}'
+            for doc in response["source_documents"]
+        })
+
+        history_entry = QueryHistory(
+            query=request.query,
+            result=result_text,
+            sources=json.dumps(sources)
+        )
+        db.add(history_entry)
+        db.commit()
 
         return QueryResponse(result=result_text, sources=sources)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+@app.get("/history", response_model=List[QueryResponse])
+async def get_history():
+    db = SessionLocal()
+    try:
+        history = db.query(QueryHistory).all()
+        return [
+            QueryResponse(
+                result=entry.result,
+                sources=json.loads(entry.sources)
+            )
+            for entry in history
+        ]
+    finally:
+        db.close()
