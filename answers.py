@@ -17,13 +17,15 @@ from langchain_community.document_loaders import (
     Docx2txtLoader,
 )
 from langchain_chroma import Chroma
+from dotenv import load_dotenv
 
 
-# Set API Key securely
-os.environ["OPENAI_API_KEY"] = "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"
-
+load_dotenv()
+api_key = os.environ.get("OPENAI_API_KEY")
 # FastAPI app
 app = FastAPI()
+
+#llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0, openai_api_key=api_key)
 
 # Enable CORS
 app.add_middleware(
@@ -82,7 +84,7 @@ text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=20
 texts = text_splitter.split_documents(all_docs)
 
 # Embedding setup
-embedding = OpenAIEmbeddings()
+embedding = OpenAIEmbeddings(openai_api_key=api_key)
 
 # Vector DB setup
 # Update Chroma initialization and remove the direct embedding_function argument
@@ -96,7 +98,7 @@ vectordb = Chroma.from_documents(
 retriever = vectordb.as_retriever(search_kwargs={"k": 5})
 
 # Initialize language model (OpenAI)
-llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0)
+llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0,openai_api_key=api_key)
 
 # Setup the retrieval-based QA chain
 qa_chain = RetrievalQA.from_chain_type(
