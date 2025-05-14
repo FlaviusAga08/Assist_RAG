@@ -81,7 +81,7 @@ def convert_doc_to_docx(doc_path: str) -> str:
     return None
 
 # Load documents
-doc_directory = "/home/flavius/Documents/Sistem RAG Licitatii publice/FAQ pentru AI/Documente utile"
+doc_directory = os.getenv("DOC_LOCATION")
 persist_directory = "db"
 
 all_docs = []
