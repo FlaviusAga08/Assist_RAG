@@ -1,5 +1,4 @@
-# models.py
-from sqlalchemy import Column, Integer, Text, create_engine
+from sqlalchemy import Column, Integer, String, Text, create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
@@ -13,7 +12,5 @@ class QueryHistory(Base):
     result = Column(Text)
     sources = Column(Text)
 
-# Define database
-DATABASE_URL = "sqlite:///./history.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+engine = create_engine("sqlite:///./history.db")
 SessionLocal = sessionmaker(bind=engine)

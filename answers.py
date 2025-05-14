@@ -28,11 +28,12 @@ try:
     excel_supported = True
 except ImportError:
     excel_supported = False
-    print(" Excel files will be skipped. Run `pip install pandas openpyxl` to enable.")
+    print(" Excel files will be skipped. Run pip install pandas openpyxl to enable.")
 
 # Load environment variables
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
+doc_location = os.getenv("LOCATION")
 
 # Download NLTK data
 nltk.download("punkt")
@@ -61,7 +62,7 @@ class QueryResponse(BaseModel):
     result: str
     sources: List[str]
 
-# Function to convert .doc to .docx using LibreOffice
+# Convert .doc to .docx using LibreOffice
 def convert_doc_to_docx(doc_path: str) -> str:
     output_dir = os.path.dirname(doc_path)
     try:
@@ -79,13 +80,13 @@ def convert_doc_to_docx(doc_path: str) -> str:
         print(f" Failed to convert: {doc_path}")
     return None
 
-# Load documents from directory
+# Load documents
 doc_directory = "/home/flavius/Documents/Sistem RAG Licitatii publice/FAQ pentru AI/Documente utile"
 persist_directory = "db"
 
 all_docs = []
 
-for path in Path(doc_directory).rglob("*"):
+for path in Path(doc_location).rglob("*"):
     if path.is_file():
         filename = path.name
         file_path = str(path)
@@ -117,19 +118,16 @@ for path in Path(doc_directory).rglob("*"):
         except Exception as e:
             print(f" Error loading {filename}: {e}")
 
-# Split documents
+# Split and embed documents
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
 texts = text_splitter.split_documents(all_docs)
 
-# Embeddings and vector DB
 embedding = OpenAIEmbeddings(openai_api_key=api_key)
 vectordb = Chroma.from_documents(texts, embedding, persist_directory=persist_directory)
 retriever = vectordb.as_retriever(search_kwargs={"k": 5})
 
-# LLM setup
 llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0, openai_api_key=api_key)
 
-# Retrieval QA chain
 qa_chain = RetrievalQA.from_chain_type(
     llm=llm,
     chain_type="stuff",
@@ -137,17 +135,32 @@ qa_chain = RetrievalQA.from_chain_type(
     return_source_documents=True
 )
 
-@app.post("/query", response_model=QueryResponse)
+# Main query endpoint
+@app.post("/query", response_model=List[QueryResponse])
 async def run_query(request: QueryRequest):
     db = SessionLocal()
     try:
+        # 1. Check for exact match in query history
+        existing_entry = db.query(QueryHistory).filter(QueryHistory.query == request.query).first()
+        if existing_entry:
+            return [QueryResponse(
+                result=existing_entry.result,
+                sources=json.loads(existing_entry.sources)
+            )]
+
+        # 2. Run new query with LangChain
         response = qa_chain.invoke(request.query)
         result_text = response["result"]
-        sources = list({
-            f'{doc.metadata.get("source", "Unknown")} - page {doc.metadata.get("page", "N/A")}'
-            for doc in response["source_documents"]
-        })
 
+        sources = []
+        if response["source_documents"]:
+            doc = response["source_documents"][0]
+            page = doc.metadata.get("page", None)
+            page_str = f" - page {page + 1}" if isinstance(page, int) else ""
+            source = f'{doc.metadata.get("source", "Unknown")}{page_str}'
+            sources.append(source)
+
+        # 3. Save result
         history_entry = QueryHistory(
             query=request.query,
             result=result_text,
@@ -156,13 +169,15 @@ async def run_query(request: QueryRequest):
         db.add(history_entry)
         db.commit()
 
-        return QueryResponse(result=result_text, sources=sources)
+        # 4. Return only current result
+        return [QueryResponse(result=result_text, sources=sources)]
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
 
+# History endpoint
 @app.get("/history", response_model=List[QueryResponse])
 async def get_history():
     db = SessionLocal()
